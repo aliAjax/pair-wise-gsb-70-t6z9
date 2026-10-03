@@ -11,19 +11,29 @@ function openApi(
       const properties = operation.fields
         .map((field) => {
           const [name, type = 'string'] = field.split(':');
-          return `              ${name}: { type: "${type}" }`;
+          return `                    ${name}: { type: "${type}" }`;
         })
-        .join(',\n');
-      return `    ${operation.path}:
-      ${operation.method}:
-        summary: ${operation.summary}
-        requestBody:
+        .join('\n');
+      const requestBody = ['post', 'put', 'patch'].includes(operation.method)
+        ? `        requestBody:
           content:
             application/json:
               schema:
                 type: object
                 properties:
+${properties}`
+        : `        responses:
+          '200':
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
 ${properties}`;
+      return `    ${operation.path}:
+      ${operation.method}:
+        summary: ${operation.summary}
+${requestBody}`;
     })
     .join('\n');
 
@@ -69,6 +79,8 @@ function change(
     reviewState: 'pending',
     reviewer: '',
     reviewComment: '',
+    consumerConfirmations: [],
+    reviewHistory: [],
     ...overrides,
   };
 }
@@ -123,6 +135,8 @@ export const seedContracts: ApiContract[] = [
     status: 'review',
     updatedAt: '2026-09-29T03:12:00.000Z',
     openapi: orderOpenApi,
+    archivedChanges: [],
+    revision: 1,
     changes: [
       change(
         'chg-order-1',
@@ -230,6 +244,8 @@ export const seedContracts: ApiContract[] = [
     status: 'ready',
     updatedAt: '2026-09-28T10:40:00.000Z',
     openapi: paymentOpenApi,
+    archivedChanges: [],
+    revision: 1,
     changes: [
       change(
         'chg-pay-1',
@@ -283,6 +299,15 @@ export const seedContracts: ApiContract[] = [
         requestsPerDay: 320000,
         contact: 'pay-ops@example.com',
       },
+      {
+        id: 'consumer-bi',
+        name: '经营分析',
+        owner: '数据产品组',
+        environment: '预发',
+        clientVersion: '2.1.5',
+        requestsPerDay: 90000,
+        contact: 'bi-api@example.com',
+      },
     ],
     exemptions: [],
     versions: [
@@ -308,6 +333,8 @@ export const seedContracts: ApiContract[] = [
     status: 'review',
     updatedAt: '2026-09-27T06:15:00.000Z',
     openapi: userOpenApi,
+    archivedChanges: [],
+    revision: 1,
     changes: [
       change(
         'chg-user-1',

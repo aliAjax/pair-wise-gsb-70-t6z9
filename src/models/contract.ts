@@ -2,12 +2,48 @@ export type ContractStatus = 'draft' | 'review' | 'ready' | 'released' | 'frozen
 export type ChangeKind =
   | 'field_added'
   | 'field_removed'
+  | 'field_type_changed'
   | 'optionality_changed'
   | 'enum_expanded'
+  | 'enum_narrowed'
   | 'error_code_added'
   | 'error_code_removed';
 export type Compatibility = 'compatible' | 'warning' | 'breaking';
 export type ReviewState = 'pending' | 'accepted' | 'returned' | 'exemption';
+export type ConsumerConfirmationState = 'confirmed' | 'rejected' | 'exemption';
+
+/** 可由定义比较自动检出的差异类型（手工错误码差异不在此列）。 */
+export const AUTO_DETECTED_KINDS: ReadonlySet<ChangeKind> = new Set<ChangeKind>([
+  'field_added',
+  'field_removed',
+  'field_type_changed',
+  'optionality_changed',
+  'enum_expanded',
+  'enum_narrowed',
+]);
+
+export interface ConsumerConfirmation {
+  id: string;
+  consumerId: string;
+  consumerName: string;
+  state: ConsumerConfirmationState;
+  note: string;
+  confirmedBy: string;
+  confirmedAt: string;
+  /** 定义改动导致旧确认失效后保留原记录，仅作查询，不再通过门禁。 */
+  invalidated?: boolean;
+  invalidatedReason?: string;
+  invalidatedAt?: string;
+}
+
+export interface ReviewHistoryEntry {
+  id: string;
+  reviewState: ReviewState;
+  reviewer: string;
+  reviewComment: string;
+  reviewedAt: string;
+  invalidatedReason: string;
+}
 
 export interface ContractChange {
   id: string;
@@ -24,6 +60,24 @@ export interface ContractChange {
   reviewer: string;
   reviewComment: string;
   reviewedAt?: string;
+  /** 差异相对基线的稳定签名，用于判断清单是否仍与实际定义一致。 */
+  baselineSignature?: string;
+  /** 旧数据迁移补录的差异，没有真实签名；定义再次保存后按基线重算。 */
+  legacy?: boolean;
+  /** 非空表示差异已被重新计算，该条旧结论失效、等待重新确认。 */
+  staleReason?: string;
+  detectedAt?: string;
+  fieldName?: string;
+  fieldLocation?: string;
+  consumerConfirmations: ConsumerConfirmation[];
+  reviewHistory: ReviewHistoryEntry[];
+  /** 已随某个正式版本冻结归档。 */
+  releasedInVersion?: string;
+}
+
+export interface ArchivedChange extends ContractChange {
+  archivedReason: string;
+  archivedAt: string;
 }
 
 export interface ApiConsumer {
@@ -54,6 +108,10 @@ export interface ContractVersion {
   notes: string;
   changeIds: string[];
   openapi: string;
+  /** 是否为当前比较基线。 */
+  isBaseline?: boolean;
+  /** 旧数据缺少基线时，按首个冻结快照回填。 */
+  baselineBackfilled?: boolean;
 }
 
 export interface ApiContract {
@@ -70,6 +128,15 @@ export interface ApiContract {
   consumers: ApiConsumer[];
   exemptions: Exemption[];
   versions: ContractVersion[];
+  /** 当前比较基线对应的冻结版本。 */
+  baselineVersionId?: string;
+  baselineChecksum?: string;
+  /** 基线为旧数据回填时记录回填时间。 */
+  baselineBackfilledAt?: string;
+  /** 已失效但保留可查的差异结论。 */
+  archivedChanges: ArchivedChange[];
+  /** 乐观锁版本，两个窗口同时保存时后写者拿到冲突。 */
+  revision: number;
 }
 
 export interface ReleaseIssue {
@@ -83,8 +150,10 @@ export interface ReleaseIssue {
 export const CHANGE_KIND_LABELS: Record<ChangeKind, string> = {
   field_added: '新增字段',
   field_removed: '删除字段',
-  optionality_changed: '可选性变化',
+  field_type_changed: '字段类型变化',
+  optionality_changed: '必填变化',
   enum_expanded: '枚举扩展',
+  enum_narrowed: '枚举收窄',
   error_code_added: '新增错误码',
   error_code_removed: '删除错误码',
 };
@@ -100,6 +169,12 @@ export const REVIEW_STATE_LABELS: Record<ReviewState, string> = {
   accepted: '已接受',
   returned: '已退回',
   exemption: '兼容层豁免',
+};
+
+export const CONSUMER_CONFIRMATION_LABELS: Record<ConsumerConfirmationState, string> = {
+  confirmed: '确认接受',
+  rejected: '确认不接受',
+  exemption: '走兼容层',
 };
 
 export const CONTRACT_STATUS_LABELS: Record<ContractStatus, string> = {
@@ -120,6 +195,16 @@ export function classifyChange(input: {
       return {
         compatibility: 'breaking',
         rationale: '删除字段会使仍读取该字段的客户端解析失败或业务判断缺失。',
+      };
+    case 'field_type_changed':
+      return {
+        compatibility: 'breaking',
+        rationale: '字段类型变化会导致客户端按旧类型解析失败或精度、枚举语义改变。',
+      };
+    case 'enum_narrowed':
+      return {
+        compatibility: 'breaking',
+        rationale: '枚举值被移除后，仍发送或读取旧值的调用方会被拒绝或出现未知分支。',
       };
     case 'error_code_removed':
       return {
@@ -161,6 +246,20 @@ export function classifyChange(input: {
   }
 }
 
+export function findBaselineVersion(contract: ApiContract): ContractVersion | undefined {
+  return contract.versions.find((version) => version.id === contract.baselineVersionId);
+}
+
+export function activeConsumerConfirmations(change: ContractChange): ConsumerConfirmation[] {
+  return change.consumerConfirmations.filter(
+    (confirmation) => confirmation.state === 'confirmed' && !confirmation.invalidated,
+  );
+}
+
+export function invalidatedConsumerConfirmations(change: ContractChange): ConsumerConfirmation[] {
+  return change.consumerConfirmations.filter((confirmation) => confirmation.invalidated);
+}
+
 export function validateForRelease(contract: ApiContract): ReleaseIssue[] {
   const issues: ReleaseIssue[] = [];
   const pending = contract.changes.filter((change) => change.reviewState === 'pending');
@@ -172,6 +271,35 @@ export function validateForRelease(contract: ApiContract): ReleaseIssue[] {
       detail: `${change.method} ${change.path} 仍处于待评审状态。`,
       changeId: change.id,
     });
+  });
+
+  // 旧结论已因定义改动失效，必须对重新计算后的差异重新确认。
+  contract.changes
+    .filter((change) => change.staleReason)
+    .forEach((change) => {
+      issues.push({
+        id: `stale-${change.id}`,
+        severity: 'blocker',
+        title: '差异结论已失效，需要重新确认',
+        detail: `${change.method} ${change.path}：${change.staleReason}`,
+        changeId: change.id,
+      });
+    });
+
+  // 调用方确认失效：原确认仍可查，但门禁按未确认处理。
+  contract.changes.forEach((change) => {
+    const invalidated = invalidatedConsumerConfirmations(change);
+    if (invalidated.length) {
+      issues.push({
+        id: `invalidated-confirmation-${change.id}`,
+        severity: 'blocker',
+        title: '调用方确认已失效',
+        detail: `${change.method} ${change.path} 上 ${invalidated
+          .map((item) => item.consumerName)
+          .join('、')} 的确认已随定义改动失效，需要重新确认。`,
+        changeId: change.id,
+      });
+    }
   });
 
   contract.changes
@@ -200,6 +328,26 @@ export function validateForRelease(contract: ApiContract): ReleaseIssue[] {
       }
     });
 
+  // 不兼容差异必须逐个拿到调用方确认（或登记兼容层豁免）。
+  contract.changes
+    .filter(
+      (change) =>
+        change.compatibility === 'breaking' &&
+        change.reviewState === 'accepted' &&
+        !contract.exemptions.some((item) => item.changeId === change.id) &&
+        contract.consumers.length > 0 &&
+        activeConsumerConfirmations(change).length === 0,
+    )
+    .forEach((change) => {
+      issues.push({
+        id: `consumer-confirm-${change.id}`,
+        severity: 'blocker',
+        title: '不兼容差异缺少调用方确认',
+        detail: `${change.path} 还没有任何受影响调用方确认接受；原确认若已失效需重新确认。`,
+        changeId: change.id,
+      });
+    });
+
   contract.changes
     .filter(
       (change) =>
@@ -216,6 +364,15 @@ export function validateForRelease(contract: ApiContract): ReleaseIssue[] {
         changeId: change.id,
       });
     });
+
+  if (!contract.baselineVersionId) {
+    issues.push({
+      id: 'baseline-missing',
+      severity: 'warning',
+      title: '尚未建立比较基线',
+      detail: '首份正式版本冻结后，将以该冻结快照作为字段差异比较基线。',
+    });
+  }
 
   return issues;
 }

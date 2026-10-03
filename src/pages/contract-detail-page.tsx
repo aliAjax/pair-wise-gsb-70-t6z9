@@ -7,11 +7,13 @@ import {
   Download,
   FileWarning,
   GitCompare,
+  GitCompareArrows,
   Layers3,
   LockKeyhole,
   Users,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { ArchivedChangesPanel } from '../components/contract/archived-changes-panel';
 import { ChangeReviewItem } from '../components/contract/change-review-item';
 import { CompatibilityBadge } from '../components/contract/compatibility-badge';
 import { ConsumerTable } from '../components/contract/consumer-table';
@@ -33,11 +35,14 @@ import { Textarea } from '../components/ui/textarea';
 import { formatDateTime } from '../lib/utils';
 import {
   REVIEW_STATE_LABELS,
+  findBaselineVersion,
   type ApiContract,
+  type ConsumerConfirmationState,
   type ContractChange,
   type ReviewState,
   validateForRelease,
 } from '../models/contract';
+import { getCatalogSync } from '../services/contract-service';
 import {
   buildChangeReport,
   diffVersionSummary,
@@ -45,8 +50,10 @@ import {
 } from '../services/contract-service';
 import {
   useAddExemption,
+  useConfirmConsumer,
   useContract,
   useFreezeVersion,
+  useRecalculateChanges,
   useReviewChange,
   useSaveContract,
   useUpdateOpenApi,
@@ -61,12 +68,16 @@ export function ContractDetailPage() {
   const reviewChange = useReviewChange();
   const addExemption = useAddExemption();
   const updateOpenApi = useUpdateOpenApi();
+  const recalculate = useRecalculateChanges();
   const saveContract = useSaveContract();
   const freezeVersion = useFreezeVersion();
+  const confirmConsumer = useConfirmConsumer();
   const [releaseVersion, setReleaseVersion] = useState('');
   const [releaseNotes, setReleaseNotes] = useState('');
   const [reviewFilter, setReviewFilter] = useState<ReviewState | 'all'>('all');
   const [selectedVersionId, setSelectedVersionId] = useState('');
+  const [saveError, setSaveError] = useState('');
+  const [recalcNotice, setRecalcNotice] = useState('');
 
   const contract = contractQuery.data;
   const issues = useMemo(
@@ -75,13 +86,16 @@ export function ContractDetailPage() {
   );
   const blockers = issues.filter((issue) => issue.severity === 'blocker').length;
   const warnings = issues.filter((issue) => issue.severity === 'warning').length;
-  const acceptedCount = contract?.changes.filter((change) => change.reviewState !== 'pending').length ?? 0;
+  const acceptedCount =
+    contract?.changes.filter((change) => change.reviewState !== 'pending').length ?? 0;
   const reviewProgress = contract?.changes.length
     ? Math.round((acceptedCount / contract.changes.length) * 100)
     : 100;
   const selectedVersion =
     contract?.versions.find((version) => version.id === selectedVersionId) ??
     contract?.versions[0];
+  const baseline = contract ? findBaselineVersion(contract) : undefined;
+  const sync = contract ? getCatalogSync(contract) : undefined;
 
   if (contractQuery.isLoading) {
     return <PageState text="正在加载契约详情..." />;
@@ -102,10 +116,13 @@ export function ContractDetailPage() {
   async function updateChange(changeId: string, patch: Partial<ContractChange>) {
     if (!contract) return;
     await saveContract.mutateAsync({
-      ...contract,
-      changes: contract.changes.map((change) =>
-        change.id === changeId ? { ...change, ...patch } : change,
-      ),
+      contract: {
+        ...contract,
+        changes: contract.changes.map((change) =>
+          change.id === changeId ? { ...change, ...patch } : change,
+        ),
+      },
+      expectedRevision: contract.revision,
     });
   }
 
@@ -123,8 +140,58 @@ export function ContractDetailPage() {
     await addExemption.mutateAsync({ contractId, changeId, reason });
   }
 
+  async function handleConfirmConsumer(input: {
+    changeId: string;
+    consumerId: string;
+    state: ConsumerConfirmationState;
+    note: string;
+  }) {
+    await confirmConsumer.mutateAsync({
+      contractId,
+      changeId: input.changeId,
+      consumerId: input.consumerId,
+      state: input.state,
+      note: input.note,
+      reviewer: '当前评审人',
+    });
+  }
+
   async function saveOpenApi(value: string) {
-    await updateOpenApi.mutateAsync({ contractId, openapi: value });
+    if (!contract) return;
+    const expectedRevision = contract.revision;
+    setSaveError('');
+    setRecalcNotice('');
+    try {
+      const result = await updateOpenApi.mutateAsync({
+        contractId,
+        openapi: value,
+        expectedRevision,
+      });
+      const parts: string[] = [];
+      if (result.added) parts.push(`新增 ${result.added} 项基线差异`);
+      if (result.invalidated) parts.push(`${result.invalidated} 项旧结论失效待重新确认`);
+      setRecalcNotice(
+        parts.length
+          ? `已按冻结基线重算：${parts.join('，')}。共享调用方的确认已同步处理。`
+          : '定义已保存，差异清单与冻结基线一致，没有新的字段变化。',
+      );
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : '保存失败，请重试。');
+    }
+  }
+
+  async function recalcNow() {
+    setSaveError('');
+    try {
+      const result = await recalculate.mutateAsync(contractId);
+      setRecalcNotice(
+        result.added || result.invalidated
+          ? `重新计算完成：新增 ${result.added} 项，失效 ${result.invalidated} 项。`
+          : '清单已与基线差异一致，无需更新。',
+      );
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : '重算失败。');
+    }
   }
 
   async function freeze() {
@@ -175,6 +242,14 @@ export function ContractDetailPage() {
               <span className="font-mono text-xs text-sky-800">{contract.protocol}</span>
               <Badge tone="slate">v{contract.version}</Badge>
               <StatusPill status={contract.status} />
+              {baseline ? (
+                <Badge tone="blue">
+                  基线 v{baseline.version}
+                  {baseline.baselineBackfilled ? '（首个冻结快照回填）' : ''}
+                </Badge>
+              ) : (
+                <Badge tone="amber">尚未建立基线</Badge>
+              )}
             </div>
             <h1 className="mt-2 text-2xl font-semibold text-slate-950 sm:text-3xl">
               {contract.name}
@@ -184,18 +259,18 @@ export function ContractDetailPage() {
             </p>
           </div>
           <div className="grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200">
-            <HeaderMetric label="变更项" value={String(contract.changes.length)} />
+            <HeaderMetric label="差异项" value={String(contract.changes.length)} />
             <HeaderMetric label="调用方" value={String(contract.consumers.length)} />
-            <HeaderMetric label="发布门禁" value={blockers ? `${blockers} 阻断` : '通过'} danger={!!blockers} />
+            <HeaderMetric
+              label="发布门禁"
+              value={blockers ? `${blockers} 阻断` : '通过'}
+              danger={!!blockers}
+            />
           </div>
         </div>
       </section>
 
-      <Tabs
-        value={activeTab}
-        onValueChange={setActiveTab}
-        className="mt-4"
-      >
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-4">
         <TabsList>
           <TabsTrigger value="overview">概览与契约</TabsTrigger>
           <TabsTrigger value="changes">差异评审</TabsTrigger>
@@ -207,12 +282,71 @@ export function ContractDetailPage() {
 
         <TabsContent value="overview">
           <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
-            <ContractEditor
-              key={`${contract.id}-${contract.openapi}`}
-              contract={contract}
-              onSave={(value) => void saveOpenApi(value)}
-              saving={updateOpenApi.isPending}
-            />
+            <div className="space-y-3">
+              <Card>
+                <CardHeader className="flex-row items-center justify-between space-y-0">
+                  <div>
+                    <CardTitle>比较基线</CardTitle>
+                    <p className="mt-1 text-xs text-slate-500">
+                      保存定义时以冻结版本为基线自动重算字段增删、类型、枚举与必填变化
+                    </p>
+                  </div>
+                  {sync && (
+                    <Badge tone={sync.synced ? 'green' : 'red'}>
+                      {sync.synced
+                        ? '清单与定义一致'
+                        : `清单过期（缺 ${sync.missing} / 多 ${sync.extra} / 待认 ${sync.stale}）`}
+                    </Badge>
+                  )}
+                </CardHeader>
+                <CardContent className="text-xs leading-6 text-slate-600">
+                  {baseline ? (
+                    <>
+                      <div>
+                        基线版本 <strong>v{baseline.version}</strong> · 冻结于{' '}
+                        {formatDateTime(baseline.releasedAt)} · 校验值{' '}
+                        <span className="font-mono">{baseline.checksum}</span>
+                      </div>
+                      {baseline.baselineBackfilled && contract.baselineBackfilledAt && (
+                        <div className="mt-1 text-amber-700">
+                          旧数据缺少基线，已按首个冻结快照回填（回填时间{' '}
+                          {formatDateTime(contract.baselineBackfilledAt)}）。
+                        </div>
+                      )}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={recalculate.isPending || !baseline}
+                    onClick={() => void recalcNow()}
+                  >
+                    <GitCompareArrows className="h-3.5 w-3.5" />
+                    立即重新计算差异
+                  </Button>
+                    </>
+                  ) : (
+                    <div>
+                      尚无冻结版本，首份正式版本冻结后将自动建立比较基线；在此之前手工清单不会被重算覆盖。
+                    </div>
+                  )}
+                  {recalcNotice && (
+                    <p className="mt-3 rounded border border-emerald-200 bg-emerald-50 p-2 text-emerald-900">
+                      {recalcNotice}
+                    </p>
+                  )}
+                  {saveError && (
+                    <p className="mt-3 rounded border border-red-200 bg-red-50 p-2 text-red-800">
+                      {saveError}
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+              <ContractEditor
+                key={`${contract.id}-${contract.openapi}`}
+                contract={contract}
+                onSave={(value) => void saveOpenApi(value)}
+                saving={updateOpenApi.isPending}
+              />
+            </div>
             <div className="space-y-4">
               <Card>
                 <CardHeader>
@@ -272,36 +406,49 @@ export function ContractDetailPage() {
               <div>
                 <CardTitle>字段与错误码差异</CardTitle>
                 <p className="mt-1 text-xs text-slate-500">
-                  每种变化必须逐条接受、退回或申请兼容层
+                  差异由冻结基线自动重算；定义再改动后旧结论失效，必须逐条重新确认
                 </p>
               </div>
-              <Select
-                value={reviewFilter}
-                onValueChange={(value) => setReviewFilter(value as ReviewState | 'all')}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">全部评审状态</SelectItem>
-                  {Object.entries(REVIEW_STATE_LABELS).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={recalculate.isPending || !baseline}
+                  onClick={() => void recalcNow()}
+                >
+                  <GitCompareArrows className="h-3.5 w-3.5" />
+                  重新计算
+                </Button>
+                <Select
+                  value={reviewFilter}
+                  onValueChange={(value) => setReviewFilter(value as ReviewState | 'all')}
+                >
+                  <SelectTrigger className="w-40">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部评审状态</SelectItem>
+                    {Object.entries(REVIEW_STATE_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </CardHeader>
             <CardContent className="p-0">
               {filteredChanges.map((change) => (
                 <ChangeReviewItem
-                  key={`${change.id}-${change.reviewState}-${change.impactStatement}-${change.migrationPlan}`}
+                  key={`${change.id}-${change.reviewState}-${change.staleReason ?? 'fresh'}`}
                   change={change}
+                  consumers={contract.consumers}
                   onReview={(changeId, state, comment) =>
                     void handleReview(changeId, state, comment)
                   }
                   onUpdate={(changeId, patch) => void updateChange(changeId, patch)}
                   onExemption={(changeId, reason) => void handleExemption(changeId, reason)}
+                  onConfirmConsumer={(input) => void handleConfirmConsumer(input)}
                 />
               ))}
               {!filteredChanges.length && (
@@ -309,6 +456,9 @@ export function ContractDetailPage() {
               )}
             </CardContent>
           </Card>
+          <div className="mt-4">
+            <ArchivedChangesPanel changes={contract.archivedChanges} />
+          </div>
         </TabsContent>
 
         <TabsContent value="consumers">
@@ -316,7 +466,7 @@ export function ContractDetailPage() {
             <CardHeader>
               <CardTitle>依赖调用方列表</CardTitle>
               <p className="mt-1 text-xs text-slate-500">
-                用于判断一次契约变化影响的客户端、环境与流量规模
+                共享调用方在任一关联契约定义改动后，其对差异的确认会一起失效
               </p>
             </CardHeader>
             <CardContent className="p-0">
@@ -335,6 +485,13 @@ export function ContractDetailPage() {
                 </p>
               </CardHeader>
               <CardContent>
+                {sync && !sync.synced && (
+                  <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-3 text-xs leading-5 text-red-900">
+                    <strong>差异清单已与定义脱节：</strong>
+                    相对冻结基线缺少 {sync.missing} 项、多出 {sync.extra} 项、
+                    {sync.stale} 项等待重新确认。请保存定义或重新计算差异后再冻结。
+                  </div>
+                )}
                 {issues.map((issue) => (
                   <div
                     key={issue.id}
@@ -357,7 +514,7 @@ export function ContractDetailPage() {
                 ))}
                 {!issues.length && (
                   <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-                    所有变更评审和迁移约束均已满足，可以冻结正式版本。
+                    所有变更评审、调用方确认和迁移约束均已满足，可以冻结正式版本。
                   </div>
                 )}
               </CardContent>
@@ -367,7 +524,7 @@ export function ContractDetailPage() {
               <CardHeader>
                 <CardTitle>冻结正式版本</CardTitle>
                 <p className="mt-1 text-xs text-slate-500">
-                  冻结后版本定义不可覆盖，并保留校验值
+                  冻结后该快照成为新的比较基线，旧差异归档保留
                 </p>
               </CardHeader>
               <CardContent>
@@ -423,6 +580,16 @@ export function ContractDetailPage() {
                           {version.checksum}
                         </span>
                       </div>
+                      {version.isBaseline && (
+                        <Badge className="mt-2" tone="blue">
+                          当前比较基线
+                        </Badge>
+                      )}
+                      {version.baselineBackfilled && (
+                        <Badge className="ml-1 mt-2" tone="amber">
+                          首个冻结快照回填
+                        </Badge>
+                      )}
                       <p className="mt-2 text-xs leading-5 text-slate-600">{version.notes}</p>
                     </button>
                   ))}
@@ -469,10 +636,10 @@ export function ContractDetailPage() {
         <TabsContent value="report">
           <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
             <Card>
-              <CardHeader className="flex flex-row items-center justify-between">
+              <CardHeader className="flex-row items-center justify-between space-y-0">
                 <div>
                   <CardTitle>变更报告预览</CardTitle>
-                  <p className="mt-1 text-xs text-slate-500">Markdown 格式，可直接进入评审材料</p>
+                  <p className="mt-1 text-xs text-slate-500">Markdown 格式，标注所采用基线</p>
                 </div>
                 <Button variant="secondary" size="sm" onClick={exportReport}>
                   <Download className="h-3.5 w-3.5" />
@@ -492,6 +659,11 @@ export function ContractDetailPage() {
                   <CardTitle>报告要素</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
+                  <ReportFact
+                    icon={GitCompare}
+                    label="比较基线"
+                    value={baseline ? `v${baseline.version}` : '未建立'}
+                  />
                   <ReportFact
                     icon={GitCompare}
                     label="变更明细"

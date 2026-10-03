@@ -111,8 +111,10 @@ export function DashboardPage() {
         consumers: [],
         exemptions: [],
         versions: [],
+        archivedChanges: [],
+        revision: 1,
       };
-      await saveContract.mutateAsync(contract);
+      await saveContract.mutateAsync({ contract });
       setImportText('');
       setImportOpen(false);
       await navigate({ to: '/contracts/$contractId', params: { contractId: contract.id } });

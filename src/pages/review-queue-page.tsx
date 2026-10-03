@@ -192,6 +192,15 @@ export function ReviewQueuePage() {
                         <Badge tone="neutral">v{item.version}</Badge>
                         <CompatibilityBadge value={item.change.compatibility} />
                         <ReviewStateBadge value={item.change.reviewState} />
+                        {item.change.staleReason && (
+                          <Badge tone="red">旧结论失效待重认</Badge>
+                        )}
+                        {item.change.legacy && !item.change.staleReason && (
+                          <Badge tone="amber">基线补录</Badge>
+                        )}
+                        {item.change.consumerConfirmations.some(
+                          (confirmation) => confirmation.invalidated,
+                        ) && <Badge tone="red">调用方确认失效</Badge>}
                       </div>
                       <div className="mt-2 font-mono text-xs text-slate-600">
                         {item.change.method} {item.change.path}
