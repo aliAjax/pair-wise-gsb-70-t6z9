@@ -39,6 +39,11 @@ export function ChangeReviewItem({
             </span>
             <CompatibilityBadge value={change.compatibility} />
             <ReviewStateBadge value={change.reviewState} />
+            {change.baseline ? (
+              <Badge tone="neutral">基线 v{change.baseline.version}</Badge>
+            ) : (
+              <Badge tone="amber">未核对基线</Badge>
+            )}
           </div>
           <h3 className="mt-2 text-sm font-semibold text-slate-900">
             {CHANGE_KIND_LABELS[change.kind]}

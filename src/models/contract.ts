@@ -2,12 +2,23 @@ export type ContractStatus = 'draft' | 'review' | 'ready' | 'released' | 'frozen
 export type ChangeKind =
   | 'field_added'
   | 'field_removed'
+  | 'type_changed'
   | 'optionality_changed'
   | 'enum_expanded'
+  | 'enum_reduced'
   | 'error_code_added'
   | 'error_code_removed';
 export type Compatibility = 'compatible' | 'warning' | 'breaking';
 export type ReviewState = 'pending' | 'accepted' | 'returned' | 'exemption';
+
+/** 差异比较所采用的基线（冻结版本快照）。 */
+export interface BaselineRef {
+  versionId: string;
+  version: string;
+  checksum: string;
+  /** frozen：正常冻结快照；backfilled：旧数据缺少基线时按首个冻结快照回填 */
+  source: 'frozen' | 'backfilled';
+}
 
 export interface ContractChange {
   id: string;
@@ -24,6 +35,32 @@ export interface ContractChange {
   reviewer: string;
   reviewComment: string;
   reviewedAt?: string;
+  /** 差异针对的字段名或错误码，由差异引擎生成 */
+  target?: string;
+  /** 差异所在的一侧：请求、响应或错误码集合 */
+  side?: 'request' | 'response' | 'error';
+  /** 差异内容指纹，定义保存重算后用于判断旧结论是否仍然有效 */
+  fingerprint?: string;
+  /** 计算该差异时采用的比较基线 */
+  baseline?: BaselineRef;
+}
+
+/** 评审结论历史。定义变化或差异组失效后，原确认归档到这里，仍可查询。 */
+export interface ReviewConfirmation {
+  id: string;
+  changeId: string;
+  path: string;
+  method: string;
+  kind: ChangeKind;
+  reviewState: ReviewState;
+  reviewer: string;
+  comment: string;
+  impactStatement: string;
+  migrationPlan: string;
+  fingerprint: string;
+  confirmedAt: string;
+  invalidatedAt: string;
+  reason: string;
 }
 
 export interface ApiConsumer {
@@ -54,6 +91,8 @@ export interface ContractVersion {
   notes: string;
   changeIds: string[];
   openapi: string;
+  /** 冻结该版本时差异清单所采用的比较基线 */
+  baseline?: BaselineRef;
 }
 
 export interface ApiContract {
@@ -70,6 +109,7 @@ export interface ApiContract {
   consumers: ApiConsumer[];
   exemptions: Exemption[];
   versions: ContractVersion[];
+  confirmations: ReviewConfirmation[];
 }
 
 export interface ReleaseIssue {
@@ -83,8 +123,10 @@ export interface ReleaseIssue {
 export const CHANGE_KIND_LABELS: Record<ChangeKind, string> = {
   field_added: '新增字段',
   field_removed: '删除字段',
+  type_changed: '类型变化',
   optionality_changed: '可选性变化',
   enum_expanded: '枚举扩展',
+  enum_reduced: '枚举收缩',
   error_code_added: '新增错误码',
   error_code_removed: '删除错误码',
 };
@@ -110,6 +152,11 @@ export const CONTRACT_STATUS_LABELS: Record<ContractStatus, string> = {
   frozen: '已冻结',
 };
 
+export const BASELINE_SOURCE_LABELS: Record<BaselineRef['source'], string> = {
+  frozen: '冻结快照',
+  backfilled: '首个冻结快照回填',
+};
+
 export function classifyChange(input: {
   kind: ChangeKind;
   before: string;
@@ -125,6 +172,16 @@ export function classifyChange(input: {
       return {
         compatibility: 'breaking',
         rationale: '删除错误码会破坏调用方基于错误码建立的分支与重试策略。',
+      };
+    case 'type_changed':
+      return {
+        compatibility: 'breaking',
+        rationale: '字段类型变化会使按旧类型反序列化的客户端解析失败或精度丢失。',
+      };
+    case 'enum_reduced':
+      return {
+        compatibility: 'breaking',
+        rationale: '移除枚举值会使仍产生或消费该值的调用方出现非法数据。',
       };
     case 'field_added':
       if (/required/i.test(input.after) || /必填/.test(input.after)) {
@@ -213,6 +270,18 @@ export function validateForRelease(contract: ApiContract): ReleaseIssue[] {
         severity: 'warning',
         title: '不兼容变更已接受但未登记豁免',
         detail: `${change.path} 需要记录兼容层的范围、原因和到期时间。`,
+        changeId: change.id,
+      });
+    });
+
+  contract.changes
+    .filter((change) => !change.baseline)
+    .forEach((change) => {
+      issues.push({
+        id: `baseline-${change.id}`,
+        severity: 'warning',
+        title: '差异未与冻结基线核对',
+        detail: `${change.method} ${change.path} 缺少比较基线，保存定义后会按最近冻结版本重算。`,
         changeId: change.id,
       });
     });

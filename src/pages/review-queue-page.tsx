@@ -31,6 +31,8 @@ interface QueueItem {
   version: string;
   updatedAt: string;
   change: ContractChange;
+  /** 该差异曾有确认被失效，当前结论为重新确认 */
+  reconfirmed: boolean;
 }
 
 export function ReviewQueuePage() {
@@ -49,15 +51,19 @@ export function ReviewQueuePage() {
   const queue = useMemo<QueueItem[]>(
     () =>
       (contracts.data ?? [])
-        .flatMap((contract) =>
-          contract.changes.map((change) => ({
+        .flatMap((contract) => {
+          const invalidatedIds = new Set(
+            contract.confirmations.map((confirmation) => confirmation.changeId),
+          );
+          return contract.changes.map((change) => ({
             contractId: contract.id,
             contractName: contract.name,
             version: contract.version,
             updatedAt: contract.updatedAt,
             change,
-          })),
-        )
+            reconfirmed: invalidatedIds.has(change.id),
+          }));
+        })
         .filter((item) => {
           const keyword = query.trim().toLowerCase();
           return (
@@ -192,6 +198,7 @@ export function ReviewQueuePage() {
                         <Badge tone="neutral">v{item.version}</Badge>
                         <CompatibilityBadge value={item.change.compatibility} />
                         <ReviewStateBadge value={item.change.reviewState} />
+                        {item.reconfirmed && <Badge tone="amber">需重新确认</Badge>}
                       </div>
                       <div className="mt-2 font-mono text-xs text-slate-600">
                         {item.change.method} {item.change.path}

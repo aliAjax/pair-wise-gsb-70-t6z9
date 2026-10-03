@@ -1,11 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { ReviewState } from '../models/contract';
+import type { ChangeKind, ReviewState } from '../models/contract';
 import {
   addExemption,
   bulkReviewChanges,
   freezeVersion,
   getContract,
+  invalidateChangeGroup,
   listContracts,
+  listRecoveryBatches,
+  recoverPendingBatches,
   reviewChange,
   saveContract,
   updateContractOpenApi,
@@ -14,6 +17,7 @@ import {
 export const contractKeys = {
   all: ['contracts'] as const,
   detail: (id: string) => ['contracts', id] as const,
+  recovery: ['recovery-batches'] as const,
 };
 
 export function useContracts() {
@@ -49,6 +53,7 @@ export function useReviewChange() {
         input.comment,
       ),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: contractKeys.all }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: contractKeys.recovery }),
   });
 }
 
@@ -68,6 +73,7 @@ export function useBulkReview() {
         input.comment,
       ),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: contractKeys.all }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: contractKeys.recovery }),
   });
 }
 
@@ -77,6 +83,7 @@ export function useUpdateOpenApi() {
     mutationFn: (input: { contractId: string; openapi: string }) =>
       updateContractOpenApi(input.contractId, input.openapi),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: contractKeys.all }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: contractKeys.recovery }),
   });
 }
 
@@ -85,6 +92,7 @@ export function useSaveContract() {
   return useMutation({
     mutationFn: saveContract,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: contractKeys.all }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: contractKeys.recovery }),
   });
 }
 
@@ -94,6 +102,7 @@ export function useAddExemption() {
     mutationFn: (input: { contractId: string; changeId: string; reason: string }) =>
       addExemption(input.contractId, input.changeId, input.reason),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: contractKeys.all }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: contractKeys.recovery }),
   });
 }
 
@@ -103,5 +112,34 @@ export function useFreezeVersion() {
     mutationFn: (input: { contractId: string; version: string; notes: string }) =>
       freezeVersion(input.contractId, input.version, input.notes),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: contractKeys.all }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: contractKeys.recovery }),
+  });
+}
+
+export function useInvalidateChangeGroup() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { contractIds: string[]; changeKind: ChangeKind; reason: string }) =>
+      invalidateChangeGroup(input.contractIds, input.changeKind, input.reason),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: contractKeys.all }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: contractKeys.recovery }),
+  });
+}
+
+export function useRecoveryBatches() {
+  return useQuery({
+    queryKey: contractKeys.recovery,
+    queryFn: listRecoveryBatches,
+  });
+}
+
+export function useRecoverBatches() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: recoverPendingBatches,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: contractKeys.all });
+      queryClient.invalidateQueries({ queryKey: contractKeys.recovery });
+    },
   });
 }

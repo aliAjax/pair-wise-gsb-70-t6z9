@@ -2,12 +2,15 @@ import { Link, Outlet, useRouterState } from '@tanstack/react-router';
 import {
   BookOpenCheck,
   ClipboardCheck,
+  CloudUpload,
   GitCompareArrows,
   LayoutDashboard,
   Network,
   PackageCheck,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { useRecoverBatches, useRecoveryBatches } from '../../services/contract-queries';
+import { Button } from '../ui/button';
 
 const navigation = [
   { to: '/', label: '契约工作台', icon: LayoutDashboard, exact: true },
@@ -18,6 +21,12 @@ const navigation = [
 
 export function AppShell() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const recoveryBatches = useRecoveryBatches();
+  const recoverBatches = useRecoverBatches();
+  const pendingOperations = (recoveryBatches.data ?? []).reduce(
+    (sum, batch) => sum + batch.operations.length,
+    0,
+  );
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -100,6 +109,35 @@ export function AppShell() {
               );
             })}
           </nav>
+          {!!pendingOperations && (
+            <div className="flex flex-wrap items-center gap-3 border-t border-amber-200 bg-amber-50 px-4 py-2.5 sm:px-6">
+              <CloudUpload className="h-4 w-4 shrink-0 text-amber-700" />
+              <p className="min-w-0 flex-1 text-xs leading-5 text-amber-900">
+                {recoveryBatches.data?.length} 个待恢复批次、{pendingOperations}{' '}
+                项操作因并发保存或写入失败未完成（
+                {(recoveryBatches.data ?? [])
+                  .flatMap((batch) => batch.operations)
+                  .map((operation) => operation.label)
+                  .slice(0, 2)
+                  .join('；')}
+                {pendingOperations > 2 ? ' 等' : ''}
+                ）。恢复时只补未完成契约，不重复生成版本。
+              </p>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={recoverBatches.isPending}
+                onClick={() => void recoverBatches.mutateAsync()}
+              >
+                {recoverBatches.isPending ? '恢复中' : '恢复未完成批次'}
+              </Button>
+              {recoverBatches.isSuccess && !recoverBatches.data.remaining.length && (
+                <span className="text-xs text-emerald-700">
+                  已补写 {recoverBatches.data.recovered} 项操作
+                </span>
+              )}
+            </div>
+          )}
         </header>
 
         <main className="mx-auto max-w-[1500px] p-4 sm:p-6 lg:p-8">

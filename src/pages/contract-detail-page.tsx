@@ -32,6 +32,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Textarea } from '../components/ui/textarea';
 import { formatDateTime } from '../lib/utils';
 import {
+  BASELINE_SOURCE_LABELS,
+  CHANGE_KIND_LABELS,
   REVIEW_STATE_LABELS,
   type ApiContract,
   type ContractChange,
@@ -267,48 +269,93 @@ export function ContractDetailPage() {
         </TabsContent>
 
         <TabsContent value="changes">
-          <Card>
-            <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <CardTitle>字段与错误码差异</CardTitle>
-                <p className="mt-1 text-xs text-slate-500">
-                  每种变化必须逐条接受、退回或申请兼容层
-                </p>
-              </div>
-              <Select
-                value={reviewFilter}
-                onValueChange={(value) => setReviewFilter(value as ReviewState | 'all')}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">全部评审状态</SelectItem>
-                  {Object.entries(REVIEW_STATE_LABELS).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
+          <div className="space-y-4">
+            <Card>
+              <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <CardTitle>字段与错误码差异</CardTitle>
+                  <p className="mt-1 text-xs text-slate-500">
+                    以最近冻结版本为基线重算，每种变化必须逐条接受、退回或申请兼容层
+                  </p>
+                </div>
+                <Select
+                  value={reviewFilter}
+                  onValueChange={(value) => setReviewFilter(value as ReviewState | 'all')}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部评审状态</SelectItem>
+                    {Object.entries(REVIEW_STATE_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </CardHeader>
+              <CardContent className="p-0">
+                {filteredChanges.map((change) => (
+                  <ChangeReviewItem
+                    key={`${change.id}-${change.reviewState}-${change.impactStatement}-${change.migrationPlan}`}
+                    change={change}
+                    onReview={(changeId, state, comment) =>
+                      void handleReview(changeId, state, comment)
+                    }
+                    onUpdate={(changeId, patch) => void updateChange(changeId, patch)}
+                    onExemption={(changeId, reason) => void handleExemption(changeId, reason)}
+                  />
+                ))}
+                {!filteredChanges.length && (
+                  <p className="p-10 text-center text-sm text-slate-500">没有符合条件的变更项。</p>
+                )}
+              </CardContent>
+            </Card>
+
+            {!!contract.confirmations.length && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>失效确认记录</CardTitle>
+                  <p className="mt-1 text-xs text-slate-500">
+                    接口定义变化后原结论自动失效，需重新确认；原确认保留在这里供查询
+                  </p>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {contract.confirmations.map((confirmation) => (
+                    <article
+                      key={confirmation.id}
+                      className="rounded-md border border-amber-200 bg-amber-50 p-3"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-[11px] font-semibold text-amber-950">
+                          {confirmation.method} {confirmation.path}
+                        </span>
+                        <Badge tone="amber">{CHANGE_KIND_LABELS[confirmation.kind]}</Badge>
+                        <Badge tone="neutral">
+                          原结论 {REVIEW_STATE_LABELS[confirmation.reviewState]}
+                        </Badge>
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-amber-900">
+                        {confirmation.reason}
+                      </p>
+                      {(confirmation.impactStatement || confirmation.migrationPlan) && (
+                        <p className="mt-1 text-[11px] leading-5 text-amber-800">
+                          原影响说明：{confirmation.impactStatement || '未填写'} · 原迁移方案：
+                          {confirmation.migrationPlan || '未填写'}
+                        </p>
+                      )}
+                      <div className="mt-2 text-[11px] text-amber-800">
+                        确认人 {confirmation.reviewer || '未指定'} · 确认于{' '}
+                        {formatDateTime(confirmation.confirmedAt)} · 失效于{' '}
+                        {formatDateTime(confirmation.invalidatedAt)}
+                      </div>
+                    </article>
                   ))}
-                </SelectContent>
-              </Select>
-            </CardHeader>
-            <CardContent className="p-0">
-              {filteredChanges.map((change) => (
-                <ChangeReviewItem
-                  key={`${change.id}-${change.reviewState}-${change.impactStatement}-${change.migrationPlan}`}
-                  change={change}
-                  onReview={(changeId, state, comment) =>
-                    void handleReview(changeId, state, comment)
-                  }
-                  onUpdate={(changeId, patch) => void updateChange(changeId, patch)}
-                  onExemption={(changeId, reason) => void handleExemption(changeId, reason)}
-                />
-              ))}
-              {!filteredChanges.length && (
-                <p className="p-10 text-center text-sm text-slate-500">没有符合条件的变更项。</p>
-              )}
-            </CardContent>
-          </Card>
+                </CardContent>
+              </Card>
+            )}
+          </div>
         </TabsContent>
 
         <TabsContent value="consumers">
@@ -424,6 +471,11 @@ export function ContractDetailPage() {
                         </span>
                       </div>
                       <p className="mt-2 text-xs leading-5 text-slate-600">{version.notes}</p>
+                      <p className="mt-1.5 text-[11px] text-slate-500">
+                        {version.baseline
+                          ? `比较基线 v${version.baseline.version}（${BASELINE_SOURCE_LABELS[version.baseline.source]}）`
+                          : '首个冻结快照，无前置基线'}
+                      </p>
                     </button>
                   ))}
                   {!contract.versions.length && (
